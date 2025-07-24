@@ -63,7 +63,7 @@ def index():
     <!DOCTYPE html>
     <html lang="en">
     <head>
-        <meta charset="UTF-8">
+        <meta charset="UTF-8" />
         <title>Arabic With AAeshah</title>
         <style>
             body {
@@ -72,7 +72,7 @@ def index():
                 background-color: #f8f9fa;
             }
             .container {
-                max-width: 800px;
+                max-width: 900px;
                 margin: 0 auto;
                 background: white;
                 padding: 30px;
@@ -104,12 +104,39 @@ def index():
                 padding: 20px;
                 border-radius: 8px;
             }
-            iframe {
-                margin-top: 20px;
-                width: 100%;
-                height: 300px;
-                border: 1px solid #ccc;
-                border-radius: 8px;
+            /* Styles for keyboard and mic button */
+            #arabicKeyboard {
+                margin-top: 15px;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 5px;
+            }
+            #arabicKeyboard button {
+                font-size: 16px;
+                padding: 8px 12px;
+                border: none;
+                border-radius: 4px;
+                background-color: #e2e6ea;
+                cursor: pointer;
+            }
+            #arabicKeyboard button:hover {
+                background-color: #d6d8db;
+            }
+            #micButton {
+                margin-top: 10px;
+                cursor: pointer;
+                font-size: 24px;
+                background: none;
+                border: none;
+            }
+            #micButton:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+            #speechStatus {
+                margin-top: 10px;
+                font-style: italic;
+                color: #555;
             }
         </style>
     </head>
@@ -123,8 +150,56 @@ def index():
             </form>
             <p>{{ message }}</p>
 
-            <iframe src="https://www.lexilogos.com/keyboard/arabic.htm"></iframe>
+            <!-- Arabic Keyboard -->
+            <h3>Arabic Keyboard</h3>
+            <div id="arabicKeyboard">
+                <button onclick="insertChar('ا')">ا</button>
+                <button onclick="insertChar('ب')">ب</button>
+                <button onclick="insertChar('ت')">ت</button>
+                <button onclick="insertChar('ث')">ث</button>
+                <button onclick="insertChar('ج')">ج</button>
+                <button onclick="insertChar('ح')">ح</button>
+                <button onclick="insertChar('خ')">خ</button>
+                <button onclick="insertChar('د')">د</button>
+                <button onclick="insertChar('ذ')">ذ</button>
+                <button onclick="insertChar('ر')">ر</button>
+                <button onclick="insertChar('ز')">ز</button>
+                <button onclick="insertChar('س')">س</button>
+                <button onclick="insertChar('ش')">ش</button>
+                <button onclick="insertChar('ص')">ص</button>
+                <button onclick="insertChar('ض')">ض</button>
+                <button onclick="insertChar('ط')">ط</button>
+                <button onclick="insertChar('ظ')">ظ</button>
+                <button onclick="insertChar('ع')">ع</button>
+                <button onclick="insertChar('غ')">غ</button>
+                <button onclick="insertChar('ف')">ف</button>
+                <button onclick="insertChar('ق')">ق</button>
+                <button onclick="insertChar('ك')">ك</button>
+                <button onclick="insertChar('ل')">ل</button>
+                <button onclick="insertChar('م')">م</button>
+                <button onclick="insertChar('ن')">ن</button>
+                <button onclick="insertChar('ه')">ه</button>
+                <button onclick="insertChar('و')">و</button>
+                <button onclick="insertChar('ي')">ي</button>
+                <button onclick="insertChar('ء')">ء</button>
+                <button onclick="insertChar('ئ')">ئ</button>
+                <button onclick="insertChar('ؤ')">ؤ</button>
+                <button onclick="insertChar('ة')">ة</button>
+                <button onclick="insertChar('َ')">َ</button>
+                <button onclick="insertChar('ُ')">ُ</button>
+                <button onclick="insertChar('ِ')">ِ</button>
+                <button onclick="insertChar('ً')">ً</button>
+                <button onclick="insertChar('ٌ')">ٌ</button>
+                <button onclick="insertChar('ٍ')">ٍ</button>
+                <button onclick="insertChar('ْ')">ْ</button>
+                <button onclick="insertChar('ٓ')">ٓ</button>
+                <button onclick="clearInput()">Clear</button>
+            </div>
+            <!-- Microphone Button -->
+            <button id="micButton" title="Speak" onclick="startRecognition()">🎤</button>
+            <div id="speechStatus"></div>
 
+            <!-- Word list -->
             <div class="word-list">
                 <h2>Your Words</h2>
                 <ul>
@@ -135,10 +210,52 @@ def index():
                     {% endfor %}
                 </ul>
             </div>
-            <p style="margin-top: 20px;">
-              <a href="{{ url_for('practice') }}" style="background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 6px;">Start Practice</a>
+            <p style="margin-top:20px;">
+                <a href="{{ url_for('practice') }}" style="background-color:#007bff; color:white; padding:10px 20px; text-decoration:none; border-radius:6px;">Start Practice</a>
             </p>
         </div>
+
+        <script>
+        function insertChar(char) {
+            const input = document.getElementById('new_word');
+            input.value += char;
+        }
+        function clearInput() {
+            document.getElementById('new_word').value = '';
+        }
+
+        // Speech Recognition
+        var recognition;
+        function startRecognition() {
+            const statusDiv = document.getElementById('speechStatus');
+            if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+                alert("Sorry, your browser doesn't support Speech Recognition.");
+                return;
+            }
+
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.lang = 'ar-SA'; // Arabic dialect
+            recognition.interimResults = false;
+            recognition.maxAlternatives = 1;
+
+            recognition.onstart = () => {
+                document.getElementById('speechStatus').innerText = 'Listening...';
+            };
+            recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript;
+                document.getElementById('new_word').value += transcript;
+                document.getElementById('speechStatus').innerText = 'Recognized: ' + transcript;
+            };
+            recognition.onerror = (event) => {
+                document.getElementById('speechStatus').innerText = 'Error: ' + event.error;
+            };
+            recognition.onend = () => {
+                document.getElementById('speechStatus').innerText = '';
+            };
+            recognition.start();
+        }
+        </script>
     </body>
     </html>
     """, words_with_translations=words_with_translations, message=message)
@@ -174,7 +291,7 @@ def practice():
     <!DOCTYPE html>
     <html lang="en">
     <head>
-        <meta charset="UTF-8">
+        <meta charset="UTF-8" />
         <title>Practice - Arabic With AAeshah</title>
         <style>
             body {
@@ -217,13 +334,6 @@ def practice():
                 border-radius: 6px;
                 margin-top: 20px;
             }
-            iframe {
-                margin-top: 20px;
-                width: 100%;
-                height: 300px;
-                border: 1px solid #ccc;
-                border-radius: 8px;
-            }
         </style>
     </head>
     <body>
@@ -239,18 +349,100 @@ def practice():
                 <input type="submit" value="Check Answer" />
             </form>
 
-            <iframe src="https://www.lexilogos.com/keyboard/arabic.htm"></iframe>
-
-            {% if feedback %}
-            <div class="feedback">
-                <strong>Feedback:</strong> {{ feedback }}
+            <!-- Same Arabic keyboard as in index -->
+            <h3>Arabic Keyboard</h3>
+            <div id="arabicKeyboard" style="margin-top: 10px; display: flex; flex-wrap: wrap; gap: 5px;">
+                <button onclick="insertChar('ا')">ا</button>
+                <button onclick="insertChar('ب')">ب</button>
+                <button onclick="insertChar('ت')">ت</button>
+                <button onclick="insertChar('ث')">ث</button>
+                <button onclick="insertChar('ج')">ج</button>
+                <button onclick="insertChar('ح')">ح</button>
+                <button onclick="insertChar('خ')">خ</button>
+                <button onclick="insertChar('د')">د</button>
+                <button onclick="insertChar('ذ')">ذ</button>
+                <button onclick="insertChar('ر')">ر</button>
+                <button onclick="insertChar('ز')">ز</button>
+                <button onclick="insertChar('س')">س</button>
+                <button onclick="insertChar('ش')">ش</button>
+                <button onclick="insertChar('ص')">ص</button>
+                <button onclick="insertChar('ض')">ض</button>
+                <button onclick="insertChar('ط')">ط</button>
+                <button onclick="insertChar('ظ')">ظ</button>
+                <button onclick="insertChar('ع')">ع</button>
+                <button onclick="insertChar('غ')">غ</button>
+                <button onclick="insertChar('ف')">ف</button>
+                <button onclick="insertChar('ق')">ق</button>
+                <button onclick="insertChar('ك')">ك</button>
+                <button onclick="insertChar('ل')">ل</button>
+                <button onclick="insertChar('م')">م</button>
+                <button onclick="insertChar('ن')">ن</button>
+                <button onclick="insertChar('ه')">ه</button>
+                <button onclick="insertChar('و')">و</button>
+                <button onclick="insertChar('ي')">ي</button>
+                <button onclick="insertChar('ء')">ء</button>
+                <button onclick="insertChar('ئ')">ئ</button>
+                <button onclick="insertChar('ؤ')">ؤ</button>
+                <button onclick="insertChar('ة')">ة</button>
+                <button onclick="insertChar('َ')">َ</button>
+                <button onclick="insertChar('ُ')">ُ</button>
+                <button onclick="insertChar('ِ')">ِ</button>
+                <button onclick="insertChar('ً')">ً</button>
+                <button onclick="insertChar('ٌ')">ٌ</button>
+                <button onclick="insertChar('ٍ')">ٍ</button>
+                <button onclick="insertChar('ْ')">ْ</button>
+                <button onclick="insertChar('ٓ')">ٓ</button>
+                <button onclick="clearInput()">Clear</button>
             </div>
-            {% endif %}
+            <!-- Microphone -->
+            <button id="micButton" title="Speak" onclick="startRecognition()">🎤</button>
+            <div id="speechStatus"></div>
 
-            <p style="margin-top: 20px;">
-              <a href="{{ url_for('index') }}" style="background-color: #6c757d; color: white; padding: 10px 20px; text-decoration: none; border-radius: 6px;">Back to word list</a>
+            <p style="margin-top:20px;">
+                <a href="{{ url_for('index') }}" style="background-color:#6c757d; color:white; padding:10px 20px; text-decoration:none; border-radius:6px;">Back to word list</a>
             </p>
         </div>
+
+        <script>
+        function insertChar(char) {
+            const input = document.querySelector('input[name="user_answer"]');
+            input.value += char;
+        }
+        function clearInput() {
+            document.querySelector('input[name="user_answer"]').value = '';
+        }
+
+        // Speech Recognition
+        var recognition;
+        function startRecognition() {
+            const statusDiv = document.getElementById('speechStatus');
+            if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+                alert("Sorry, your browser doesn't support Speech Recognition.");
+                return;
+            }
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.lang = 'ar-SA'; // Arabic dialect
+            recognition.interimResults = false;
+            recognition.maxAlternatives = 1;
+
+            recognition.onstart = () => {
+                document.getElementById('speechStatus').innerText = 'Listening...';
+            };
+            recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript;
+                document.querySelector('input[name="user_answer"]').value += transcript;
+                document.getElementById('speechStatus').innerText = 'Recognized: ' + transcript;
+            };
+            recognition.onerror = (event) => {
+                document.getElementById('speechStatus').innerText = 'Error: ' + event.error;
+            };
+            recognition.onend = () => {
+                document.getElementById('speechStatus').innerText = '';
+            };
+            recognition.start();
+        }
+        </script>
     </body>
     </html>
     """, sentence=sentence, question=question, feedback=feedback, user_answer=user_answer)
