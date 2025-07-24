@@ -1,45 +1,156 @@
+import os
+import json
 from flask import Flask, request, render_template_string, redirect, url_for
-import json, os, requests
 from dotenv import load_dotenv
+import google.generativeai as genai
+import re
+from google.cloud import translate_v2 as translate # Import Google Cloud Translation API
 
 app = Flask(__name__)
 load_dotenv()
 
+# Configure Gemini API (for text generation)
+print(f"DEBUG: GOOGLE_APPLICATION_CREDENTIALS loaded: {os.getenv('GOOGLE_APPLICATION_CREDENTIALS')}")
+
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+
+# Configure Google Cloud Translation API
+# The library automatically looks for GOOGLE_APPLICATION_CREDENTIALS environment variable
+# pointing to your service account key file.
+translate_client = translate.Client()
+
 WORDS_FILE = "arabic_words.json"
 
+# This dictionary will now primarily store manually added words and their translations.
+# Dynamically generated words will be translated on-the-fly.
+# You can pre-fill this with common words if you like.
 translations = {
     "كتاب": "book",
     "مدرسة": "school",
     "قلم": "pen",
     "تفاحة": "apple",
-    "ماء": "water"
+    "ماء": "water",
+    "مدينة": "city",
+    "بيت": "house",
+    "باب": "door",
+    "هو": "he",
+    "هي": "she",
+    "في": "in",
+    "قريب": "near",
+    "من": "from / of",
 }
 
-HF_API_URL = "https://api-inference.huggingface.co/models/akhooli/arabic-gpt2"
-HF_API_TOKEN = os.getenv("HF_API_TOKEN")
-headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+def list_models():
+    """Prints all available models for debugging purposes."""
+    models = genai.list_models()
+    print("\n--- Available Gemini Models ---")
+    for model in models:
+        print(model)
+    print("--- End Model List ---\n")
+
+# Uncomment the line below to run this once and see available models in your console
+# list_models()
 
 def load_words():
+    """Loads Arabic words from a JSON file."""
     if os.path.exists(WORDS_FILE):
         with open(WORDS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return []
 
 def save_words(words):
+    """Saves Arabic words to a JSON file."""
     with open(WORDS_FILE, "w", encoding="utf-8") as f:
         json.dump(words, f, ensure_ascii=False, indent=2)
 
-def hf_generate(prompt):
-    payload = {"inputs": prompt, "parameters": {"max_new_tokens": 60}}
-    response = requests.post(HF_API_URL, headers=headers, json=payload)
-    if response.status_code == 200:
-        data = response.json()
-        if isinstance(data, list) and len(data) > 0 and "generated_text" in data[0]:
-            return data[0]["generated_text"]
+def get_english_translation(text):
+    """Translates Arabic text to English using Google Cloud Translation API."""
+    try:
+        # The target language for translation
+        target = 'en'
+        # The source language is 'ar' (Arabic)
+        source = 'ar'
+
+        # Text is assumed to be a single word or a short phrase for this context
+        result = translate_client.translate(text, target_language=target, source_language=source)
+        return result['translatedText']
+    except Exception as e:
+        print(f"Error translating '{text}': {e}")
+        return "Translation Error" # Fallback if translation fails
+
+def generate_with_gemini(prompt_text):
+    """Generates content using the specified Gemini model and handles responses."""
+    model = genai.GenerativeModel("models/gemma-3-12b-it") # Ensure this model is valid
+
+    try:
+        response = model.generate_content(prompt_text)
+
+        # --- DEBUGGING OUTPUT ---
+        print("\n--- Gemini Response Debug ---")
+        print(f"Prompt sent: '{prompt_text}'")
+        print(f"Response object type: {type(response)}")
+        # --- END DEBUGGING OUTPUT ---
+
+        if response.candidates:
+            candidate = response.candidates[0]
+            # --- DEBUGGING OUTPUT ---
+            print(f"Candidate finish reason: {candidate.finish_reason}")
+            print(f"Candidate content object (full dump): {candidate.content}")
+            # --- END DEBUGGING OUTPUT ---
+
+            if candidate.content and candidate.content.parts and hasattr(candidate.content.parts[0], 'text'):
+                generated_text = candidate.content.parts[0].text
+                print(f"Successfully extracted text content (first 100 chars): '{generated_text[:100]}...'")
+                return generated_text
+            else:
+                print("Error: Candidate content structure is not as expected (missing parts or text in first part).")
+                return "No text content could be extracted from the model's response."
         else:
-            return "Sorry, could not generate text."
-    else:
-        return f"Error: {response.status_code} - {response.text}"
+            print("No candidates returned in the response.")
+            if response.prompt_feedback and response.prompt_feedback.block_reason:
+                print(f"Prompt blocked due to: {response.prompt_feedback.block_reason}")
+                print(f"Safety ratings: {response.prompt_feedback.safety_ratings}")
+            return "No content could be generated for this prompt (blocked or empty response)."
+
+    except Exception as e:
+        print(f"An error occurred during content generation: {e}")
+        return f"An error occurred: {e}"
+
+def parse_sentence_and_question(generated_text):
+    """Parses the generated text to extract the Arabic sentence and question."""
+    sentence = "No sentence found."
+    question = "No question found."
+
+    sentence_match = re.search(r'\*\*Sentence:\*\*\s*(.*?)(?:\s*\*\*Translation:|\s*\*\*Question:|$)', generated_text, re.DOTALL)
+    if sentence_match:
+        sentence = sentence_match.group(1).strip()
+        sentence = re.sub(r'\s*\([^)]*\)\s*', '', sentence).strip()
+
+    question_match = re.search(r'\*\*Question:\*\*\s*(.*?)(?:\s*\*\*Translation:|\s*\*\*Breakdown:|$)', generated_text, re.DOTALL)
+    if question_match:
+        question = question_match.group(1).strip()
+        question = re.sub(r'\s*\([^)]*\)\s*', '', question).strip()
+
+    if sentence == "No sentence found." and "؟" in generated_text:
+        parts = generated_text.split("؟", 1)
+        sentence_candidate = parts[0].strip()
+        if sentence_candidate and not sentence_candidate.endswith("؟"):
+             sentence = sentence_candidate
+
+        question_candidate = parts[1].strip() + "؟" if parts[1].strip() else "ما السؤال المتعلق بهذه الجملة؟"
+        if question_candidate and len(question_candidate.split()) > 2:
+            question = question_candidate
+
+    if sentence and not re.search(r'[.؟!]$', sentence) and sentence != "No sentence found.":
+        sentence += "."
+
+    if question and not question.endswith("؟") and question != "No question found.":
+        question += "؟"
+
+    if not question or question == "No question found.":
+        question = "ما السؤال المتعلق بهذه الجملة؟"
+
+    return sentence, question
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -48,12 +159,19 @@ def index():
 
     if request.method == "POST":
         new_word = request.form.get("new_word", "").strip()
-        if new_word and new_word not in words:
-            words.append(new_word)
-            save_words(words)
-            message = f'Word "{new_word}" added.'
-        elif new_word in words:
-            message = f'Word "{new_word}" already exists.'
+        if new_word:
+            # If a new word is added, dynamically translate it and add to translations
+            if new_word not in translations:
+                translated_word = get_english_translation(new_word)
+                translations[new_word] = translated_word
+                print(f"Dynamically translated '{new_word}' to '{translated_word}' and added to translations.")
+
+            if new_word not in words:
+                words.append(new_word)
+                save_words(words)
+                message = f'Word "{new_word}" added.'
+            elif new_word in words:
+                message = f'Word "{new_word}" already exists.'
         else:
             message = "Please enter a valid word."
 
@@ -66,77 +184,58 @@ def index():
         <meta charset="UTF-8" />
         <title>Arabic With AAeshah</title>
         <style>
-            body {
-                font-family: Arial, sans-serif;
-                margin: 30px;
-                background-color: #f8f9fa;
+            body { font-family: Arial; background-color: #f8f9fa; margin: 30px; }
+            .container { max-width: 900px; margin: auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            input[type="text"] { width: 100%; font-size: 18px; padding: 12px; margin-bottom: 10px; border: 2px solid #ddd; border-radius: 6px; direction: rtl; text-align: right; }
+            input[type="submit"] { background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; }
+            .word-list { margin-top: 20px; background-color: #f8f9fa; padding: 20px; border-radius: 8px; }
+            #arabicKeyboard, #arabicKeyboardPractice { margin-top: 15px; display: flex; flex-wrap: wrap; gap: 5px; }
+            #arabicKeyboard button, #arabicKeyboardPractice button { font-size: 16px; padding: 8px 12px; border: none; border-radius: 4px; background-color: #e2e6ea; cursor: pointer; }
+            #arabicKeyboard button:hover, #arabicKeyboardPractice button:hover { background-color: #d6d8db; }
+            #micButton, #micButtonPractice { margin-top: 10px; cursor: pointer; font-size: 24px; background: none; border: none; }
+
+            /* Tooltip Styles */
+            .arabic-word-with-translation {
+                position: relative;
+                display: inline-block;
+                cursor: help; /* Changes cursor to a question mark */
+                border-bottom: 1px dotted #888; /* Dotted underline */
             }
-            .container {
-                max-width: 900px;
-                margin: 0 auto;
-                background: white;
-                padding: 30px;
-                border-radius: 10px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            }
-            input[type="text"] {
-                width: 100%;
-                font-size: 18px;
-                padding: 12px;
-                margin-bottom: 10px;
-                border: 2px solid #ddd;
+
+            .arabic-word-with-translation .tooltip-text {
+                visibility: hidden;
+                width: auto; /* Adjust width based on content */
+                background-color: #555;
+                color: #fff;
+                text-align: center;
                 border-radius: 6px;
-                direction: rtl;
-                text-align: right;
+                padding: 5px 10px;
+                position: absolute;
+                z-index: 1;
+                bottom: 125%; /* Position above the text */
+                left: 50%;
+                margin-left: -50%; /* Center the tooltip */
+                opacity: 0;
+                transition: opacity 0.3s;
+                white-space: nowrap; /* Keep translation on one line */
+                direction: ltr; /* Ensure tooltip text is LTR */
+                text-align: left; /* Align tooltip text left */
             }
-            input[type="submit"] {
-                background-color: #007bff;
-                color: white;
-                padding: 10px 20px;
-                border: none;
-                border-radius: 6px;
-                cursor: pointer;
-                font-size: 16px;
+
+            .arabic-word-with-translation .tooltip-text::after {
+                content: "";
+                position: absolute;
+                top: 100%;
+                left: 50%;
+                margin-left: -5px;
+                border-width: 5px;
+                border-style: solid;
+                border-color: #555 transparent transparent transparent;
             }
-            .word-list {
-                margin-top: 20px;
-                background-color: #f8f9fa;
-                padding: 20px;
-                border-radius: 8px;
-            }
-            /* Styles for keyboard and mic button */
-            #arabicKeyboard {
-                margin-top: 15px;
-                display: flex;
-                flex-wrap: wrap;
-                gap: 5px;
-            }
-            #arabicKeyboard button {
-                font-size: 16px;
-                padding: 8px 12px;
-                border: none;
-                border-radius: 4px;
-                background-color: #e2e6ea;
-                cursor: pointer;
-            }
-            #arabicKeyboard button:hover {
-                background-color: #d6d8db;
-            }
-            #micButton {
-                margin-top: 10px;
-                cursor: pointer;
-                font-size: 24px;
-                background: none;
-                border: none;
-            }
-            #micButton:disabled {
-                opacity: 0.5;
-                cursor: not-allowed;
-            }
-            #speechStatus {
-                margin-top: 10px;
-                font-style: italic;
-                color: #555;
+
+            .arabic-word-with-translation:hover .tooltip-text {
+                visibility: visible;
+                opacity: 1;
             }
         </style>
     </head>
@@ -144,62 +243,23 @@ def index():
         <div class="container">
             <h1>Arabic With AAeshah</h1>
             <form method="POST">
-                <label>Enter an Arabic word:</label><br>
-                <input type="text" name="new_word" id="new_word" autocomplete="off" autofocus />
+                <label>Enter an Arabic word:</label>
+                <input type="text" name="new_word" id="new_word" autocomplete="off" />
                 <input type="submit" value="Add Word" />
             </form>
             <p>{{ message }}</p>
 
-            <!-- Arabic Keyboard -->
             <h3>Arabic Keyboard</h3>
             <div id="arabicKeyboard">
-                <button onclick="insertChar('ا')">ا</button>
-                <button onclick="insertChar('ب')">ب</button>
-                <button onclick="insertChar('ت')">ت</button>
-                <button onclick="insertChar('ث')">ث</button>
-                <button onclick="insertChar('ج')">ج</button>
-                <button onclick="insertChar('ح')">ح</button>
-                <button onclick="insertChar('خ')">خ</button>
-                <button onclick="insertChar('د')">د</button>
-                <button onclick="insertChar('ذ')">ذ</button>
-                <button onclick="insertChar('ر')">ر</button>
-                <button onclick="insertChar('ز')">ز</button>
-                <button onclick="insertChar('س')">س</button>
-                <button onclick="insertChar('ش')">ش</button>
-                <button onclick="insertChar('ص')">ص</button>
-                <button onclick="insertChar('ض')">ض</button>
-                <button onclick="insertChar('ط')">ط</button>
-                <button onclick="insertChar('ظ')">ظ</button>
-                <button onclick="insertChar('ع')">ع</button>
-                <button onclick="insertChar('غ')">غ</button>
-                <button onclick="insertChar('ف')">ف</button>
-                <button onclick="insertChar('ق')">ق</button>
-                <button onclick="insertChar('ك')">ك</button>
-                <button onclick="insertChar('ل')">ل</button>
-                <button onclick="insertChar('م')">م</button>
-                <button onclick="insertChar('ن')">ن</button>
-                <button onclick="insertChar('ه')">ه</button>
-                <button onclick="insertChar('و')">و</button>
-                <button onclick="insertChar('ي')">ي</button>
-                <button onclick="insertChar('ء')">ء</button>
-                <button onclick="insertChar('ئ')">ئ</button>
-                <button onclick="insertChar('ؤ')">ؤ</button>
-                <button onclick="insertChar('ة')">ة</button>
-                <button onclick="insertChar('َ')">َ</button>
-                <button onclick="insertChar('ُ')">ُ</button>
-                <button onclick="insertChar('ِ')">ِ</button>
-                <button onclick="insertChar('ً')">ً</button>
-                <button onclick="insertChar('ٌ')">ٌ</button>
-                <button onclick="insertChar('ٍ')">ٍ</button>
-                <button onclick="insertChar('ْ')">ْ</button>
-                <button onclick="insertChar('ٓ')">ٓ</button>
-                <button onclick="clearInput()">Clear</button>
+                {% for char in "ابتثجحخدذرزسشصضطظعغفقكلمنهويءئؤةًٌٍَُِْٓ" %}
+                    <button type="button" onclick="insertChar('{{ char }}', 'new_word')">{{ char }}</button>
+                {% endfor %}
+                <button type="button" onclick="clearInput('new_word')">Clear</button>
             </div>
-            <!-- Microphone Button -->
-            <button id="micButton" title="Speak" onclick="startRecognition()">🎤</button>
+
+            <button type="button" id="micButton" onclick="startRecognition('new_word')">🎤</button>
             <div id="speechStatus"></div>
 
-            <!-- Word list -->
             <div class="word-list">
                 <h2>Your Words</h2>
                 <ul>
@@ -210,48 +270,51 @@ def index():
                     {% endfor %}
                 </ul>
             </div>
-            <p style="margin-top:20px;">
+
+            <p>
                 <a href="{{ url_for('practice') }}" style="background-color:#007bff; color:white; padding:10px 20px; text-decoration:none; border-radius:6px;">Start Practice</a>
             </p>
         </div>
 
         <script>
-        function insertChar(char) {
-            const input = document.getElementById('new_word');
-            input.value += char;
+        function insertChar(char, targetId) {
+            const inputField = document.getElementById(targetId);
+            if (inputField) {
+                inputField.value += char;
+            }
         }
-        function clearInput() {
-            document.getElementById('new_word').value = '';
+        function clearInput(targetId) {
+            const inputField = document.getElementById(targetId);
+            if (inputField) {
+                inputField.value = '';
+            }
         }
 
-        // Speech Recognition
         var recognition;
-        function startRecognition() {
-            const statusDiv = document.getElementById('speechStatus');
-            if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-                alert("Sorry, your browser doesn't support Speech Recognition.");
+        function startRecognition(targetId) {
+            const statusDiv = document.getElementById(targetId === 'new_word' ? 'speechStatus' : 'speechStatusPractice');
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                alert("Speech Recognition not supported in this browser.");
+                if (statusDiv) statusDiv.textContent = "Speech Recognition not supported.";
                 return;
             }
 
-            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             recognition = new SpeechRecognition();
-            recognition.lang = 'ar-SA'; // Arabic dialect
+            recognition.lang = 'ar-SA';
             recognition.interimResults = false;
             recognition.maxAlternatives = 1;
 
-            recognition.onstart = () => {
-                document.getElementById('speechStatus').innerText = 'Listening...';
-            };
+            recognition.onstart = () => { if (statusDiv) statusDiv.textContent = "🎙 Listening..."; };
+            recognition.onerror = (event) => { if (statusDiv) statusDiv.textContent = "❌ Error: " + event.error; };
+            recognition.onend = () => { if (statusDiv) statusDiv.textContent = "Stopped."; };
             recognition.onresult = (event) => {
-                const transcript = event.results[0][0].transcript;
-                document.getElementById('new_word').value += transcript;
-                document.getElementById('speechStatus').innerText = 'Recognized: ' + transcript;
-            };
-            recognition.onerror = (event) => {
-                document.getElementById('speechStatus').innerText = 'Error: ' + event.error;
-            };
-            recognition.onend = () => {
-                document.getElementById('speechStatus').innerText = '';
+                let transcript = event.results[0][0].transcript;
+                const inputField = document.getElementById(targetId);
+                if (inputField) {
+                    inputField.value += transcript;
+                }
+                if (statusDiv) statusDiv.textContent = "✅ You said: " + transcript;
             };
             recognition.start();
         }
@@ -260,192 +323,223 @@ def index():
     </html>
     """, words_with_translations=words_with_translations, message=message)
 
+
 @app.route("/practice", methods=["GET", "POST"])
 def practice():
-    words = load_words()
     sentence = ""
     question = ""
-    feedback = ""
     user_answer = ""
+    feedback = ""
+    sentence_words_with_translations = [] # New variable for individual words
+
+    words = load_words()
 
     if not words:
         return redirect(url_for("index"))
 
     if request.method == "POST":
         user_answer = request.form.get("user_answer", "").strip()
-        question = request.form.get("question", "")
-        if user_answer and question:
-            feedback = "Answer received. (Answer evaluation coming soon.)"
+        question = request.form.get("question", "").strip()
+        original_sentence = request.form.get("original_sentence", "").strip()
+
+        # Re-process the original sentence for display with translations
+        sentence_parts = re.findall(r'\b\w+\b|[.,!?;]', original_sentence) # Improved tokenization
+        for word_part in sentence_parts:
+            # Clean the word by removing punctuation for lookup
+            cleaned_word = re.sub(r'[.?!,]', '', word_part)
+            translation = translations.get(cleaned_word, None) # Check if pre-defined
+            if translation is None: # If not pre-defined, get dynamic translation
+                translation = get_english_translation(cleaned_word)
+
+            sentence_words_with_translations.append({'arabic': word_part, 'english': translation})
+        sentence = original_sentence # Set sentence back for display
+
+        feedback = "✅ تم استلام إجابتك!" if user_answer else "❌ الرجاء إدخال إجابة."
     else:
-        prompt = f"Use the following Arabic words in a sentence: {', '.join(words)}. Then ask a related question in Arabic."
-        generated = hf_generate(prompt)
-        if "؟" in generated:
-            parts = generated.split("؟")
-            sentence = parts[0].strip() + "؟"
-            question = parts[1].strip()
-        else:
-            sentence = generated.strip()
-            question = "Can you answer this?"
+        # Prompt model to generate an Arabic sentence and question
+        prompt = f"Write a simple Arabic sentence containing the following words: {', '.join(words)}. Then write a question related to it."
+        generated = generate_with_gemini(prompt)
+        sentence, question = parse_sentence_and_question(generated)
+
+        # Process the generated sentence into individual words with translations
+        # Improved regex to split words but keep punctuation separate, or handle common attached punctuation
+        sentence_parts = re.findall(r'\b\w+\b|[.,!?;]', sentence) # This regex splits words and keeps punctuation as separate "words"
+        for word_part in sentence_parts:
+            # Clean the word by removing punctuation for lookup in translations
+            cleaned_word = re.sub(r'[.?!,]', '', word_part) # Remove punctuation for lookup
+            translation = translations.get(cleaned_word, None) # Check if pre-defined
+
+            if translation is None and cleaned_word: # If not pre-defined AND it's a valid word (not just punctuation)
+                translation = get_english_translation(cleaned_word)
+            elif not cleaned_word: # If it's just punctuation, no translation
+                translation = ""
+            elif translation is None: # Fallback if cleaned_word is empty but translation is None
+                translation = "No translation available"
+
+            sentence_words_with_translations.append({'arabic': word_part, 'english': translation})
+
 
     return render_template_string("""
     <!DOCTYPE html>
-    <html lang="en">
+    <html lang="ar" dir="rtl">
     <head>
         <meta charset="UTF-8" />
         <title>Practice - Arabic With AAeshah</title>
         <style>
-            body {
-                font-family: Arial, sans-serif;
-                margin: 30px;
-                background-color: #f8f9fa;
+            body { font-family: Arial; background-color: #f0f0f0; margin: 30px; direction: rtl; }
+            .container { max-width: 900px; margin: auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            label, h2 { font-weight: bold; margin-top: 20px; }
+            textarea { width: 100%; font-size: 20px; padding: 12px; border: 2px solid #ddd; border-radius: 6px; direction: rtl; text-align: right; }
+            input[type="submit"] { margin-top: 20px; background-color: #28a745; color: white; padding: 12px 24px; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; }
+            .feedback { margin-top: 20px; font-size: 18px; color: #333; }
+            .back-link { margin-top: 20px; display: inline-block; color: #007bff; text-decoration: none; }
+            /* Styles for the keyboard (shared with index for consistency) */
+            #arabicKeyboard, #arabicKeyboardPractice { margin-top: 15px; display: flex; flex-wrap: wrap; gap: 5px; }
+            #arabicKeyboard button, #arabicKeyboardPractice button { font-size: 16px; padding: 8px 12px; border: none; border-radius: 4px; background-color: #e2e6ea; cursor: pointer; }
+            #arabicKeyboard button:hover, #arabicKeyboardPractice button:hover { background-color: #d6d8db; }
+            #micButton, #micButtonPractice { margin-top: 10px; cursor: pointer; font-size: 24px; background: none; border: none; }
+
+            /* Tooltip Styles (copied from index and applied here too) */
+            .arabic-word-with-translation {
+                position: relative;
+                display: inline-block;
+                cursor: help; /* Changes cursor to a question mark */
+                border-bottom: 1px dotted #888; /* Dotted underline */
+                font-size: 24px; /* Make the sentence larger */
+                margin-left: 5px; /* Add some space between words */
             }
-            .container {
-                max-width: 800px;
-                margin: 0 auto;
-                background: white;
-                padding: 30px;
-                border-radius: 10px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            }
-            input[type="text"] {
-                width: 100%;
-                font-size: 18px;
-                padding: 12px;
-                margin-bottom: 15px;
-                border: 2px solid #ddd;
+
+            .arabic-word-with-translation .tooltip-text {
+                visibility: hidden;
+                width: auto; /* Adjust width based on content */
+                background-color: #555;
+                color: #fff;
+                text-align: center;
                 border-radius: 6px;
-                direction: rtl;
+                padding: 5px 10px;
+                position: absolute;
+                z-index: 1;
+                bottom: 125%; /* Position above the text */
+                left: 50%;
+                transform: translateX(-50%); /* Center the tooltip perfectly */
+                opacity: 0;
+                transition: opacity 0.3s;
+                white-space: nowrap; /* Keep translation on one line */
+                direction: ltr; /* Ensure tooltip text is LTR */
+                text-align: left; /* Align tooltip text left */
+            }
+
+            .arabic-word-with-translation .tooltip-text::after {
+                content: "";
+                position: absolute;
+                top: 100%;
+                left: 50%;
+                margin-left: -5px;
+                border-width: 5px;
+                border-style: solid;
+                border-color: #555 transparent transparent transparent;
+            }
+
+            .arabic-word-with-translation:hover .tooltip-text {
+                visibility: visible;
+                opacity: 1;
+            }
+            .sentence-display {
+                font-size: 24px; /* Ensure the whole sentence section is larger */
                 text-align: right;
-            }
-            input[type="submit"] {
-                background-color: #007bff;
-                color: white;
-                padding: 10px 20px;
-                border: none;
-                border-radius: 6px;
-                cursor: pointer;
-                font-size: 16px;
-            }
-            .feedback {
-                background-color: #d4edda;
-                border: 1px solid #c3e6cb;
-                color: #155724;
-                padding: 12px;
-                border-radius: 6px;
-                margin-top: 20px;
+                line-height: 1.8; /* Improve readability */
             }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>Practice</h1>
-            <p><strong>Sentence:</strong> {{ sentence }}</p>
-            <p><strong>Question:</strong> {{ question }}</p>
-
+            <h2>تمرين القراءة والكتابة</h2>
             <form method="POST">
-                <input type="hidden" name="question" value="{{ question }}" />
-                <label>Your answer:</label><br>
-                <input type="text" name="user_answer" value="{{ user_answer }}" autocomplete="off" />
-                <input type="submit" value="Check Answer" />
+                <p><strong>الجملة:</strong> <span class="sentence-display">
+                    {% for word_data in sentence_words_with_translations %}
+                        <span class="arabic-word-with-translation">
+                            {{ word_data.arabic }}
+                            {% if word_data.english %}
+                                <span class="tooltip-text">{{ word_data.english }}</span>
+                            {% endif %}
+                        </span>
+                    {% endfor %}
+                </span></p>
+                <p><strong>السؤال:</strong> {{ question }}</p>
+                <input type="hidden" name="question" value="{{ question }}">
+                <input type="hidden" name="original_sentence" value="{{ sentence }}"> <label for="user_answer">إجابتك:</label>
+                <textarea name="user_answer" id="user_answer" rows="4" required>{{ user_answer }}</textarea>
+
+                <h3>لوحة المفاتيح العربية</h3>
+                <div id="arabicKeyboardPractice">
+                    {% for char in "ابتثجحخدذرزسشصضطظعغفقكلمنهويءئؤةًٌٍَُِْٓ" %}
+                        <button type="button" onclick="insertChar('{{ char }}', 'user_answer')">{{ char }}</button>
+                    {% endfor %}
+                    <button type="button" onclick="clearInput('user_answer')">مسح</button>
+                </div>
+
+                <button type="button" id="micButtonPractice" onclick="startRecognition('user_answer')">🎤</button>
+                <div id="speechStatusPractice"></div>
+
+                <input type="submit" value="أرسل الإجابة">
             </form>
 
-            <!-- Same Arabic keyboard as in index -->
-            <h3>Arabic Keyboard</h3>
-            <div id="arabicKeyboard" style="margin-top: 10px; display: flex; flex-wrap: wrap; gap: 5px;">
-                <button onclick="insertChar('ا')">ا</button>
-                <button onclick="insertChar('ب')">ب</button>
-                <button onclick="insertChar('ت')">ت</button>
-                <button onclick="insertChar('ث')">ث</button>
-                <button onclick="insertChar('ج')">ج</button>
-                <button onclick="insertChar('ح')">ح</button>
-                <button onclick="insertChar('خ')">خ</button>
-                <button onclick="insertChar('د')">د</button>
-                <button onclick="insertChar('ذ')">ذ</button>
-                <button onclick="insertChar('ر')">ر</button>
-                <button onclick="insertChar('ز')">ز</button>
-                <button onclick="insertChar('س')">س</button>
-                <button onclick="insertChar('ش')">ش</button>
-                <button onclick="insertChar('ص')">ص</button>
-                <button onclick="insertChar('ض')">ض</button>
-                <button onclick="insertChar('ط')">ط</button>
-                <button onclick="insertChar('ظ')">ظ</button>
-                <button onclick="insertChar('ع')">ع</button>
-                <button onclick="insertChar('غ')">غ</button>
-                <button onclick="insertChar('ف')">ف</button>
-                <button onclick="insertChar('ق')">ق</button>
-                <button onclick="insertChar('ك')">ك</button>
-                <button onclick="insertChar('ل')">ل</button>
-                <button onclick="insertChar('م')">م</button>
-                <button onclick="insertChar('ن')">ن</button>
-                <button onclick="insertChar('ه')">ه</button>
-                <button onclick="insertChar('و')">و</button>
-                <button onclick="insertChar('ي')">ي</button>
-                <button onclick="insertChar('ء')">ء</button>
-                <button onclick="insertChar('ئ')">ئ</button>
-                <button onclick="insertChar('ؤ')">ؤ</button>
-                <button onclick="insertChar('ة')">ة</button>
-                <button onclick="insertChar('َ')">َ</button>
-                <button onclick="insertChar('ُ')">ُ</button>
-                <button onclick="insertChar('ِ')">ِ</button>
-                <button onclick="insertChar('ً')">ً</button>
-                <button onclick="insertChar('ٌ')">ٌ</button>
-                <button onclick="insertChar('ٍ')">ٍ</button>
-                <button onclick="insertChar('ْ')">ْ</button>
-                <button onclick="insertChar('ٓ')">ٓ</button>
-                <button onclick="clearInput()">Clear</button>
-            </div>
-            <!-- Microphone -->
-            <button id="micButton" title="Speak" onclick="startRecognition()">🎤</button>
-            <div id="speechStatus"></div>
+            {% if feedback %}
+                <div class="feedback">{{ feedback }}</div>
+            {% endif %}
 
-            <p style="margin-top:20px;">
-                <a href="{{ url_for('index') }}" style="background-color:#6c757d; color:white; padding:10px 20px; text-decoration:none; border-radius:6px;">Back to word list</a>
+            <p>
+                <a class="back-link" href="{{ url_for('index') }}">⟵ الرجوع إلى الصفحة الرئيسية</a>
             </p>
         </div>
 
         <script>
-        function insertChar(char) {
-            const input = document.querySelector('input[name="user_answer"]');
-            input.value += char;
+        function insertChar(char, targetId) {
+            const inputField = document.getElementById(targetId);
+            if (inputField) {
+                inputField.value += char;
+            }
         }
-        function clearInput() {
-            document.querySelector('input[name="user_answer"]').value = '';
+        function clearInput(targetId) {
+            const inputField = document.getElementById(targetId);
+            if (inputField) {
+                inputField.value = '';
+            }
         }
 
-        // Speech Recognition
         var recognition;
-        function startRecognition() {
-            const statusDiv = document.getElementById('speechStatus');
-            if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-                alert("Sorry, your browser doesn't support Speech Recognition.");
+        function startRecognition(targetId) {
+            const statusDiv = document.getElementById(targetId === 'new_word' ? 'speechStatus' : 'speechStatusPractice');
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                alert("Speech Recognition not supported in this browser.");
+                if (statusDiv) statusDiv.textContent = "Speech Recognition not supported.";
                 return;
             }
-            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
             recognition = new SpeechRecognition();
-            recognition.lang = 'ar-SA'; // Arabic dialect
+            recognition.lang = 'ar-SA';
             recognition.interimResults = false;
             recognition.maxAlternatives = 1;
 
-            recognition.onstart = () => {
-                document.getElementById('speechStatus').innerText = 'Listening...';
-            };
+            recognition.onstart = () => { if (statusDiv) statusDiv.textContent = "🎙 Listening..."; };
+            recognition.onerror = (event) => { if (statusDiv) statusDiv.textContent = "❌ Error: " + event.error; };
+            recognition.onend = () => { if (statusDiv) statusDiv.textContent = "Stopped."; };
             recognition.onresult = (event) => {
-                const transcript = event.results[0][0].transcript;
-                document.querySelector('input[name="user_answer"]').value += transcript;
-                document.getElementById('speechStatus').innerText = 'Recognized: ' + transcript;
-            };
-            recognition.onerror = (event) => {
-                document.getElementById('speechStatus').innerText = 'Error: ' + event.error;
-            };
-            recognition.onend = () => {
-                document.getElementById('speechStatus').innerText = '';
+                let transcript = event.results[0][0].transcript;
+                const inputField = document.getElementById(targetId);
+                if (inputField) {
+                    inputField.value += transcript;
+                }
+                if (statusDiv) statusDiv.textContent = "✅ You said: " + transcript;
             };
             recognition.start();
         }
         </script>
     </body>
     </html>
-    """, sentence=sentence, question=question, feedback=feedback, user_answer=user_answer)
+    """, sentence=sentence, question=question, user_answer=user_answer, feedback=feedback,
+    sentence_words_with_translations=sentence_words_with_translations)
 
 if __name__ == "__main__":
     app.run(debug=True)
