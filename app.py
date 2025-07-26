@@ -10,7 +10,6 @@ app = Flask(__name__)
 load_dotenv()
 
 # Configure Gemini API (for text generation)
-print(f"DEBUG: GOOGLE_APPLICATION_CREDENTIALS loaded: {os.getenv('GOOGLE_APPLICATION_CREDENTIALS')}")
 
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
@@ -40,16 +39,8 @@ translations = {
     "من": "from / of",
 }
 
-def list_models():
-    """Prints all available models for debugging purposes."""
-    models = genai.list_models()
-    print("\n--- Available Gemini Models ---")
-    for model in models:
-        print(model)
-    print("--- End Model List ---\n")
 
-# Uncomment the line below to run this once and see available models in your console
-# list_models()
+
 
 def load_words():
     """Loads Arabic words from a JSON file."""
@@ -63,50 +54,42 @@ def save_words(words):
     with open(WORDS_FILE, "w", encoding="utf-8") as f:
         json.dump(words, f, ensure_ascii=False, indent=2)
 
+import requests
+
+import requests
+
 def get_english_translation(text):
-    """Translates Arabic text to English using Google Cloud Translation API."""
+    """Translate Arabic to English using Ollama's local LLM (e.g., Mistral)."""
     try:
-        # The target language for translation
-        target = 'en'
-        # The source language is 'ar' (Arabic)
-        source = 'ar'
-
-        # Text is assumed to be a single word or a short phrase for this context
-        result = translate_client.translate(text, target_language=target, source_language=source)
-        return result['translatedText']
+        prompt = f"Translate this Arabic sentence to English in one word please :\n\n{text}"
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": "mistral",
+                "prompt": prompt,
+                "stream": False
+            }
+        )
+        response.raise_for_status()
+        return response.json()["response"].strip()
     except Exception as e:
-        print(f"Error translating '{text}': {e}")
-        return "Translation Error" # Fallback if translation fails
-
+        return "Translation Error"
+    
 def generate_with_gemini(prompt_text):
     """Generates content using the specified Gemini model and handles responses."""
     model = genai.GenerativeModel("models/gemma-3-12b-it") # Ensure this model is valid
 
     try:
         response = model.generate_content(prompt_text)
-
-        # --- DEBUGGING OUTPUT ---
-        print("\n--- Gemini Response Debug ---")
-        print(f"Prompt sent: '{prompt_text}'")
-        print(f"Response object type: {type(response)}")
-        # --- END DEBUGGING OUTPUT ---
-
         if response.candidates:
             candidate = response.candidates[0]
-            # --- DEBUGGING OUTPUT ---
-            print(f"Candidate finish reason: {candidate.finish_reason}")
-            print(f"Candidate content object (full dump): {candidate.content}")
-            # --- END DEBUGGING OUTPUT ---
 
             if candidate.content and candidate.content.parts and hasattr(candidate.content.parts[0], 'text'):
                 generated_text = candidate.content.parts[0].text
-                print(f"Successfully extracted text content (first 100 chars): '{generated_text[:100]}...'")
                 return generated_text
             else:
-                print("Error: Candidate content structure is not as expected (missing parts or text in first part).")
                 return "No text content could be extracted from the model's response."
         else:
-            print("No candidates returned in the response.")
             if response.prompt_feedback and response.prompt_feedback.block_reason:
                 print(f"Prompt blocked due to: {response.prompt_feedback.block_reason}")
                 print(f"Safety ratings: {response.prompt_feedback.safety_ratings}")
@@ -323,14 +306,15 @@ def index():
     </html>
     """, words_with_translations=words_with_translations, message=message)
 
-
 @app.route("/practice", methods=["GET", "POST"])
 def practice():
     sentence = ""
     question = ""
     user_answer = ""
     feedback = ""
-    sentence_words_with_translations = [] # New variable for individual words
+    sentence_words_with_translations = []  
+    question_words_with_translations = []  
+    num_questions = 1  # Default number of questions
 
     words = load_words()
 
@@ -341,43 +325,64 @@ def practice():
         user_answer = request.form.get("user_answer", "").strip()
         question = request.form.get("question", "").strip()
         original_sentence = request.form.get("original_sentence", "").strip()
+        num_questions = int(request.form.get("num_questions", 1))  # Get dropdown value
 
-        # Re-process the original sentence for display with translations
-        sentence_parts = re.findall(r'\b\w+\b|[.,!?;]', original_sentence) # Improved tokenization
+        # Process original sentence for display with translations
+        sentence_parts = re.findall(r'\b\w+\b|[.,!?;]', original_sentence)
         for word_part in sentence_parts:
-            # Clean the word by removing punctuation for lookup
             cleaned_word = re.sub(r'[.?!,]', '', word_part)
-            translation = translations.get(cleaned_word, None) # Check if pre-defined
-            if translation is None: # If not pre-defined, get dynamic translation
+            translation = translations.get(cleaned_word, None)
+            if translation is None:
                 translation = get_english_translation(cleaned_word)
-
             sentence_words_with_translations.append({'arabic': word_part, 'english': translation})
-        sentence = original_sentence # Set sentence back for display
+        sentence = original_sentence
+
+        # Process question for display with translations
+        question_parts = re.findall(r'\b\w+\b|[.,!?;]', question)
+        for word_part in question_parts:
+            cleaned_word = re.sub(r'[.?!,]', '', word_part)
+            translation = translations.get(cleaned_word, None)
+            if translation is None and cleaned_word:
+                translation = get_english_translation(cleaned_word)
+            elif not cleaned_word:
+                translation = ""
+            elif translation is None:
+                translation = "No translation available"
+            question_words_with_translations.append({'arabic': word_part, 'english': translation})
 
         feedback = "✅ تم استلام إجابتك!" if user_answer else "❌ الرجاء إدخال إجابة."
+
     else:
-        # Prompt model to generate an Arabic sentence and question
+        # Generate new sentence and question
         prompt = f"Write a simple Arabic sentence containing the following words: {', '.join(words)}. Then write a question related to it."
         generated = generate_with_gemini(prompt)
         sentence, question = parse_sentence_and_question(generated)
 
-        # Process the generated sentence into individual words with translations
-        # Improved regex to split words but keep punctuation separate, or handle common attached punctuation
-        sentence_parts = re.findall(r'\b\w+\b|[.,!?;]', sentence) # This regex splits words and keeps punctuation as separate "words"
+        # Process sentence for display
+        sentence_parts = re.findall(r'\b\w+\b|[.,!?;]', sentence)
         for word_part in sentence_parts:
-            # Clean the word by removing punctuation for lookup in translations
-            cleaned_word = re.sub(r'[.?!,]', '', word_part) # Remove punctuation for lookup
-            translation = translations.get(cleaned_word, None) # Check if pre-defined
-
-            if translation is None and cleaned_word: # If not pre-defined AND it's a valid word (not just punctuation)
+            cleaned_word = re.sub(r'[.?!,]', '', word_part)
+            translation = translations.get(cleaned_word, None)
+            if translation is None and cleaned_word:
                 translation = get_english_translation(cleaned_word)
-            elif not cleaned_word: # If it's just punctuation, no translation
+            elif not cleaned_word:
                 translation = ""
-            elif translation is None: # Fallback if cleaned_word is empty but translation is None
+            elif translation is None:
                 translation = "No translation available"
-
             sentence_words_with_translations.append({'arabic': word_part, 'english': translation})
 
+        # Process question for display
+        question_parts = re.findall(r'\b\w+\b|[.,!?;]', question)
+        for word_part in question_parts:
+            cleaned_word = re.sub(r'[.?!,]', '', word_part)
+            translation = translations.get(cleaned_word, None)
+            if translation is None and cleaned_word:
+                translation = get_english_translation(cleaned_word)
+            elif not cleaned_word:
+                translation = ""
+            elif translation is None:
+                translation = "No translation available"
+            question_words_with_translations.append({'arabic': word_part, 'english': translation})
 
     return render_template_string("""
     <!DOCTYPE html>
@@ -393,25 +398,23 @@ def practice():
             input[type="submit"] { margin-top: 20px; background-color: #28a745; color: white; padding: 12px 24px; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; }
             .feedback { margin-top: 20px; font-size: 18px; color: #333; }
             .back-link { margin-top: 20px; display: inline-block; color: #007bff; text-decoration: none; }
-            /* Styles for the keyboard (shared with index for consistency) */
             #arabicKeyboard, #arabicKeyboardPractice { margin-top: 15px; display: flex; flex-wrap: wrap; gap: 5px; }
             #arabicKeyboard button, #arabicKeyboardPractice button { font-size: 16px; padding: 8px 12px; border: none; border-radius: 4px; background-color: #e2e6ea; cursor: pointer; }
             #arabicKeyboard button:hover, #arabicKeyboardPractice button:hover { background-color: #d6d8db; }
             #micButton, #micButtonPractice { margin-top: 10px; cursor: pointer; font-size: 24px; background: none; border: none; }
 
-            /* Tooltip Styles (copied from index and applied here too) */
             .arabic-word-with-translation {
                 position: relative;
                 display: inline-block;
-                cursor: help; /* Changes cursor to a question mark */
-                border-bottom: 1px dotted #888; /* Dotted underline */
-                font-size: 24px; /* Make the sentence larger */
-                margin-left: 5px; /* Add some space between words */
+                cursor: help;
+                border-bottom: 1px dotted #888;
+                font-size: 24px;
+                margin-left: 5px;
             }
 
             .arabic-word-with-translation .tooltip-text {
                 visibility: hidden;
-                width: auto; /* Adjust width based on content */
+                width: auto;
                 background-color: #555;
                 color: #fff;
                 text-align: center;
@@ -419,14 +422,14 @@ def practice():
                 padding: 5px 10px;
                 position: absolute;
                 z-index: 1;
-                bottom: 125%; /* Position above the text */
+                bottom: 125%;
                 left: 50%;
-                transform: translateX(-50%); /* Center the tooltip perfectly */
+                transform: translateX(-50%);
                 opacity: 0;
                 transition: opacity 0.3s;
-                white-space: nowrap; /* Keep translation on one line */
-                direction: ltr; /* Ensure tooltip text is LTR */
-                text-align: left; /* Align tooltip text left */
+                white-space: nowrap;
+                direction: ltr;
+                text-align: left;
             }
 
             .arabic-word-with-translation .tooltip-text::after {
@@ -445,9 +448,9 @@ def practice():
                 opacity: 1;
             }
             .sentence-display {
-                font-size: 24px; /* Ensure the whole sentence section is larger */
+                font-size: 24px;
                 text-align: right;
-                line-height: 1.8; /* Improve readability */
+                line-height: 1.8;
             }
         </style>
     </head>
@@ -465,9 +468,29 @@ def practice():
                         </span>
                     {% endfor %}
                 </span></p>
-                <p><strong>السؤال:</strong> {{ question }}</p>
+
+                <p><strong>السؤال:</strong> <span class="sentence-display">
+                    {% for word_data in question_words_with_translations %}
+                        <span class="arabic-word-with-translation">
+                            {{ word_data.arabic }}
+                            {% if word_data.english %}
+                                <span class="tooltip-text">{{ word_data.english }}</span>
+                            {% endif %}
+                        </span>
+                    {% endfor %}
+                </span></p>
+
                 <input type="hidden" name="question" value="{{ question }}">
-                <input type="hidden" name="original_sentence" value="{{ sentence }}"> <label for="user_answer">إجابتك:</label>
+                <input type="hidden" name="original_sentence" value="{{ sentence }}">
+
+                <label for="num_questions">كم عدد الأسئلة التي تريد أن تُسأل؟</label>
+                <select name="num_questions" id="num_questions" required>
+                    {% for n in range(1, 11) %}
+                        <option value="{{ n }}" {% if n == num_questions %}selected{% endif %}>{{ n }}</option>
+                    {% endfor %}
+                </select>
+
+                <label for="user_answer">إجابتك:</label>
                 <textarea name="user_answer" id="user_answer" rows="4" required>{{ user_answer }}</textarea>
 
                 <h3>لوحة المفاتيح العربية</h3>
@@ -538,8 +561,14 @@ def practice():
         </script>
     </body>
     </html>
-    """, sentence=sentence, question=question, user_answer=user_answer, feedback=feedback,
-    sentence_words_with_translations=sentence_words_with_translations)
+    """, sentence=sentence,
+         question=question,
+         user_answer=user_answer,
+         feedback=feedback,
+         sentence_words_with_translations=sentence_words_with_translations,
+         question_words_with_translations=question_words_with_translations,
+         num_questions=num_questions)
+
 
 if __name__ == "__main__":
     app.run(debug=True)
